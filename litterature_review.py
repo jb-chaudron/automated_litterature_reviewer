@@ -6,6 +6,9 @@ import networkx as nx
 from tqdm import tqdm 
 from math import floor
 import numpy as np
+import networkx.algorithms.community as nx_comm
+from scipy.spatial.distance import squareform, pdist
+from bertopic import BERTopic
 
 
 class ArtificialLibraire():
@@ -13,7 +16,8 @@ class ArtificialLibraire():
         self.search_engine = S2paperAPI()
         self.reference_searcher = SemanticScholar()
         self.litterature_graph = nx.DiGraph()
-
+        self.nlp = spacy.load("en_core_web_lg")
+        self.nlp.add_pipe("language_detector")
     """
         Methods to get the list of paper initializing the all process
             Either by looking with a search engine
@@ -119,8 +123,44 @@ class ArtificialLibraire():
                                   if not self.litterature_graph.nodes[citing_paper]["core"]]
 
         return np.unique(nodes_out, return_counts=True)
+
+    """
+        Methods to update graph using NLP informations
+    """
+
+    def abstract2doc(self):
+        nodes = [node for node in self.litterature_graph.nodes if self.litterature_graph.nodes[node]["core"]]
+        abstracts = [self.litterature_graph.nodes[node]["abstract"] for node in nodes]
+        
+        self.docs = [doc for doc in tqdm(self.nlp.pipe([abstract if abstract != None else " " for abstract in abstracts]), total = len(abstracts))]
+        self.docs = {node : doc for (node,doc) in zip(nodes, self.docs) if ((len(doc) > 10) and (doc._.language == "en"))}
+
+    def add_weight_to_graph(self):
+
+        similarity_weight = lambda doc_a, doc_b : doc_a.similarity(doc_b)
+        weight_edges = {(node_out, node_in) : 
+                                {"weight" : similarity_weight(self.docs[node_out], self.docs[node_in])} 
+                                        for (node_out, node_in) in self.litterature_graph.edges}
+        nx.set_edge_attributes(self.litterature_graph, weight_edges)
+
+
+    def get_communities(self, resolution=1):
+        self.communities = nx_comm.louvain_communities(self.litterature_graph,"weight", resolution=1)
     
 
     """
-        Methods to create network clusters
+        Methods to perform topic analysis
     """
+
+    def bert_topic(self):
+        nlp_bertopic = spacy.load("en_core_web_lg",
+                                  exclude=['tagger', 'parser', 'ner', 'attribute_ruler', 'lemmatizer'])
+        
+        topic_model = BERTopic(embedding_model=nlp_bertopic)
+
+        abstract_attribute = nx.get_node_attributes(self.litterature_graph,"abstract")
+
+        topics, probs = topic_model.fit_transform([abstract for (node,abstract) in 
+                                                        abstract_attribute.items()])
+        hierarchical_topics = topic_model.hierarchical_topics([abstract for (node,abstract) in 
+                                                                                abstract_attribute.items()])
