@@ -4,6 +4,9 @@ import spacy
 import spacy_fastlang
 import networkx as nx
 from tqdm import tqdm 
+from math import floor
+import numpy as np
+
 
 class ArtificialLibraire():
     def __init__(self) -> None:
@@ -11,6 +14,11 @@ class ArtificialLibraire():
         self.reference_searcher = SemanticScholar()
         self.litterature_graph = nx.DiGraph()
 
+    """
+        Methods to get the list of paper initializing the all process
+            Either by looking with a search engine
+            Either by giving the list of paper as input
+    """
     def doc_from_research(self, request, field=["Computer Science"], nb_paper=40):
         self.search_engine.get(request,
                                n=nb_paper,
@@ -20,6 +28,9 @@ class ArtificialLibraire():
     def doc_from_zotero(self, DOI_in):
         self.papers_id = [self.reference_searcher.get_paper(doi).paperId for doi in DOI_in]
 
+    """
+        Methods to get the graph of nearest neighbors in the citation space
+    """
     def get_graph(self, core=False):
         get_ref = lambda a : [(a["paperId"],b["paperId"]) for b in a.references if ((not b["paperId"] is None) and (not b is None))]
         get_citation = lambda a : [(b["paperId"],a["paperId"]) for b in a.citations if ((not b["paperId"] is None) and (not b is None))]
@@ -68,3 +79,48 @@ class ArtificialLibraire():
         else:
             return self.litterature_graph.nodes[node_name][attribute]
         
+    """
+        Methods to increase the set of interesting papers
+    """
+    def update_core_paper(self, thresh_in_degree, thresh_out_degree):
+        core_attribute = nx.get_node_attributes(self.litterature_graph,"core")
+        core_papers = [node for (node, is_core) in core_attribute.items() if is_core]
+
+        thresh_in_degree = self.transform_threshold(thresh_in_degree, core_papers)
+        thresh_out_degree = self.transform_threshold(thresh_out_degree, core_papers)
+
+        # Papers highly cited by paper that we consider as interesting
+        degree = [(node, degree) for (node, degree) in self.litterature_graph.in_degree if degree > thresh_in_degree]
+        for node, _ in degree:
+            nx.set_node_attributes(self.litterature_graph,{node : {"core" : True}})
+        
+        # Papers citing interesting papers
+        un, count = self.get_interesting_nodes()
+        interesting_nodes = un[count>thresh_out_degree]
+        for node in interesting_nodes:
+            nx.set_node_attributes(self.litterature_graph,{node : {"core" : True}})
+
+    def transform_threshold(self, threshold, core_papers):
+        if threshold < 0:
+            raise Exception("threshold inferior to Zero")
+        elif threshold < 1:
+            threshold = max(1,floor(len(core_papers)*threshold))
+        else:
+            threshold = threshold
+
+        return threshold
+    
+    def get_interesting_nodes(self):
+        core_attributes = nx.get_node_attributes(self.litterature_graph, "core")
+        core_nodes = [node for (node, is_core) in core_attributes.items() if is_core]
+
+        nodes_out = [citing_paper for node in core_nodes 
+                                  for citing_paper in self.litterature_graph.predecessors(node)
+                                  if not self.litterature_graph.nodes[citing_paper]["core"]]
+
+        return np.unique(nodes_out, return_counts=True)
+    
+
+    """
+        Methods to create network clusters
+    """
