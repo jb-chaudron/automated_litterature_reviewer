@@ -1,5 +1,5 @@
 from semanticscholar import SemanticScholar
-from S2search import S2paperAPI
+from S2search import S2paperAPI, S2paperWeb
 import spacy
 import spacy_fastlang
 import networkx as nx
@@ -9,25 +9,88 @@ import numpy as np
 import networkx.algorithms.community as nx_comm
 from scipy.spatial.distance import squareform, pdist
 from bertopic import BERTopic
+import warnings
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
 
+"""
+["biology",
+ "art",
+ "business",
+ "computer-science",
+ "chemistry",
+ "economics",
+ "engineering",
+ "environmental-science", 
+ "geography",
+ "geology",
+ "history",
+ "materials-science",
+ "mathematics",
+ "medicine",
+ "philosophy", 
+ "physics",
+ "political-science",
+ "psychology",
+ "sociology"]
+"""
+
+def search_papers(request, fields):
+    sucher = S2paperWeb()
+    sucher.get(request,
+               n=40,
+               fields0fStudy=fields,
+               sleeptry=5,
+               poolCPU0=0)
+
+    return sucher.all
 
 class ArtificialLibraire():
+
     def __init__(self) -> None:
         self.search_engine = S2paperAPI()
         self.reference_searcher = SemanticScholar()
         self.litterature_graph = nx.DiGraph()
         self.nlp = spacy.load("en_core_web_lg")
         self.nlp.add_pipe("language_detector")
+        self.allowed_fields = ["biology",
+                                "art",
+                                "business",
+                                "computer-science",
+                                "chemistry",
+                                "economics",
+                                "engineering",
+                                "environmental-science", 
+                                "geography",
+                                "geology",
+                                "history",
+                                "materials-science",
+                                "mathematics",
+                                "medicine",
+                                "philosophy", 
+                                "physics",
+                                "political-science",
+                                "psychology",
+                                "sociology"]
+        
+
     """
         Methods to get the list of paper initializing the all process
             Either by looking with a search engine
             Either by giving the list of paper as input
     """
-    def doc_from_research(self, request, field=["Computer Science"], nb_paper=40):
-        self.search_engine.get(request,
-                               n=nb_paper,
-                               fieldsOfStudy=field)
-        self.papers_id = [id for id in self.search_engine.all.paperId]
+    def _which_search_fields(self):
+        print(self.allowed_fields)
+    
+    def doc_from_research(self, request, field=["computer-science"], nb_paper=40):
+        if any(~np.isin(self.allowed_fields,field)):
+            warnings.warn(""" The allowed fields are {} all other field
+                          will not be taken into account """.format(self.allowed_fields))
+        self.results = self.reference_searcher.search_paper(request,
+                                            limit=nb_paper,
+                                            fields_of_study=field)
+        self.df_all = pd.DataFrame([dict(self.results[i]) for i in tqdm(range(nb_paper))])
+        self.papers_id = [id for id in self.df_all.paperId]
 
     def doc_from_zotero(self, DOI_in):
         self.papers_id = [self.reference_searcher.get_paper(doi).paperId for doi in DOI_in]
@@ -53,7 +116,7 @@ class ArtificialLibraire():
                 continue
             else :
 
-                paper = self.reference_searcher(node_name)
+                paper = self.reference_searcher.get_paper(node_name)
                 paper_id = paper.paperId
 
                 get_links_data = lambda paper_in : [(linked_paper.paperId,linked_paper.title,linked_paper.abstract) for linked_paper in paper_in]
@@ -79,6 +142,8 @@ class ArtificialLibraire():
 
     def check_attribute(self, node_name, attribute):
         if not node_name in self.litterature_graph.nodes:
+            return False
+        elif not attribute in self.litterature_graph.nodes[node_name].keys():
             return False
         else:
             return self.litterature_graph.nodes[node_name][attribute]
@@ -140,17 +205,114 @@ class ArtificialLibraire():
         similarity_weight = lambda doc_a, doc_b : doc_a.similarity(doc_b)
         weight_edges = {(node_out, node_in) : 
                                 {"weight" : similarity_weight(self.docs[node_out], self.docs[node_in])} 
-                                        for (node_out, node_in) in self.litterature_graph.edges}
+                                        for (node_out, node_in) in self.litterature_graph.edges
+                                        if np.all(np.isin([node_in,node_out],list(self.docs.keys())))}
         nx.set_edge_attributes(self.litterature_graph, weight_edges)
 
 
     def get_communities(self, resolution=1):
-        self.communities = nx_comm.louvain_communities(self.litterature_graph,"weight", resolution=1)
+        self.communities = nx_comm.louvain_communities(self.litterature_graph,"weight", resolution=resolution)
     
 
     """
         Methods to perform topic analysis
     """
+
+    """
+    ------------ First | Feature Extraction ------------
+    """
+    def get_lexical_neighbor(self, token_in):
+        filtre = lambda token : not (token.is_punct or token.is_space or token.is_stop)
+        token_to_return = [l_token for l_token in token_in.lefts]+[r_token for r_token in token_in.rights]
+
+        return [token for token in token_to_return if filtre(token)]
+        
+    def get_lexgrams(self, doc_in, gram=2, first=False):
+        
+        list_lexgram_out = []
+        filtre = lambda token : not (token.is_punct or token.is_space or token.is_stop)
+        for token in doc_in :
+            if first and not (token.pos_ in ["VERB","NOUN","PROPN","ADJ"]):
+                continue
+
+            lemme = token.lemma_
+
+            if gram == 2:
+                lemme_left = [left_token.lemma_ 
+                                for left_token in token.lefts
+                                if filtre(left_token)
+                                ]
+                lemme_right = [right_token.lemma_ 
+                                for right_token in token.rights
+                                if filtre(right_token)
+                                ]
+            else:
+                lemme_left = self.get_lexgrams([left_token if not filtre(left_token)
+                                                else self.get_lexical_neighbor(left_token)
+                                                for left_token in token.lefts],
+                                            gram=gram-1)
+                lemme_right = self.get_lexgrams([right_token if not filtre(right_token)
+                                                else self.get_lexical_neighbor(right_token)
+                                                for right_token in token.rights],
+                                            gram=gram-1)
+            
+            list_lexgram_out += ["-".join(left, lemme) for left in lemme_left]
+            list_lexgram_out += ["-".join(lemme, right) for right in lemme_right]
+        
+        return list_lexgram_out
+    
+    def abstract_to_lexgrams(self, abstract_list):
+        
+        docs = [self.paper2doc(paper) for paper in abstract_list]
+        lexgrams = [self.get_lexgrams(doc) for doc in docs]
+
+        return lexgrams
+        
+    def tfidf_vectorizer(self, features):
+        self.text_vectorizer = TfidfVectorizer(max_features=500,
+                                               tokenizer=lambda a : a.split(" "))
+        
+        self.tfidf_vectors = self.text_vectorizer.fit_transform(features)
+        
+    def topic_from_communities(self, n_best=5):
+        self.paper_rank = nx.pagerank(self.litterature_graph)
+        self.communities_features = []
+        for community in self.communities:
+            best_papers = sorted([(paper,self.paper_rank[paper])
+                                    for paper in community],
+                                key = lambda a : a[1],
+                                reverse=True)
+            
+            best_abstract = [self.litterature_graph.nodes[node]["abstract"]
+                                for node in best_papers[:n_best]]
+            
+            self.communities_features.append([self.abstract_to_lexgrams(best_abstract)])
+        
+        self.tfidf_vectorizer(
+                                [
+                                   " ".join(
+                                         [" ".join([gram for gram in abstract_gram])
+                                         for abstract_gram in community]
+                                        )
+                                  for community in self.communities_features
+                                ]
+                            )
+
+    
+    def paper2doc(self, paper):
+        abst = self.litterature_graph.nodes[paper]["abstract"]
+        
+        if (len(abst) < 5) or (abst == None):
+            return self.nlp(" ")
+        else:
+            out = self.nlp(abst)
+            out = self.nlp(" ") if out._.language != "en" else out 
+        
+        return out
+    
+                    
+
+
 
     def bert_topic(self):
         nlp_bertopic = spacy.load("en_core_web_lg",
